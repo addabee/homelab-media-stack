@@ -1,0 +1,219 @@
+# /mnt/calculon/media-stack/docker-compose.yml
+# Media automation stack for the FARNSWORTH / calculon-media box.
+# Jellyfin runs natively on the host (systemd), NOT in this stack.
+#
+# Traffic policy:
+#   - gluetun  = VPN gateway (PIA / WireGuard + port forwarding)
+#   - qbittorrent + flaresolverr route ALL traffic through gluetun
+#     (network_mode: service:gluetun) -> no leak if the VPN drops
+#   - prowlarr / sonarr / radarr / bazarr / jellyseerr sit on the normal
+#     bridge and reach the VPN-bound services via the "gluetun" hostname
+#
+# Paths: everything shares /mnt/calculon mounted as /data so Sonarr/Radarr
+# import from downloads -> library as instant hardlinks (no copy).
+#   /data/downloads/{incomplete,complete}   <- qBittorrent
+#   /data/media/{movies,tv,music}           <- library (Jellyfin reads these)
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - 8080:8080          # qBittorrent Web UI
+      - 6881:6881          # torrent (tcp)
+      - 6881:6881/udp      # torrent (udp)
+      - 8191:8191          # FlareSolverr
+    volumes:
+      - ./appdata/gluetun:/gluetun
+    environment:
+      - VPN_SERVICE_PROVIDER=private internet access
+      - VPN_TYPE=openvpn                  # gluetun v3 supports PIA over OpenVPN only (not WireGuard)
+      - OPENVPN_USER=${PIA_USER}          # PIA "p"-number, from .env
+      - OPENVPN_PASSWORD=${PIA_PASS}      # PIA password,  from .env
+      - SERVER_REGIONS=${PIA_REGION}      # must support port forwarding (NOT a US region)
+      - VPN_PORT_FORWARDING=on
+      - PORT_FORWARD_ONLY=on
+      - FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/24   # allow the bridge below to talk to us
+      - UPDATER_PERIOD=24h
+      - TZ=${TZ}
+    networks:
+      - media
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    restart: unless-stopped
+    network_mode: "service:gluetun"     # <-- all traffic via the VPN
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+      # Port-sync: keeps qBittorrent's listen port == the port PIA forwards to
+      # gluetun. Runs inside this container (shares gluetun's netns), so it
+      # reaches the gluetun control server at localhost:8000 and the qBittorrent
+      # Web UI at localhost:8080. Auth to gluetun uses GSP_GTN_API_KEY (matches
+      # appdata/gluetun/auth/config.toml); auth to qBittorrent is skipped via
+      # WebUI\LocalHostAuth=false in qBittorrent.conf.
+      - DOCKER_MODS=ghcr.io/t-anc/gsp-qbittorent-gluetun-sync-port-mod:main
+      - GSP_GTN_API_KEY=${GSP_GTN_API_KEY}
+      - GSP_MINIMAL_LOGS=false
+    volumes:
+      - ./appdata/qbittorrent:/config
+      - /mnt/calculon:/data
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    network_mode: "service:gluetun"     # Cloudflare-solving also via the VPN
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ}
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./appdata/prowlarr:/config
+    ports:
+      - 9696:9696
+    networks:
+      - media
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./appdata/sonarr:/config
+      - /mnt/calculon:/data
+    ports:
+      - 8989:8989
+    networks:
+      - media
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./appdata/radarr:/config
+      - /mnt/calculon:/data
+    ports:
+      - 7878:7878
+    networks:
+      - media
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./appdata/bazarr:/config
+      - /mnt/calculon:/data
+    ports:
+      - 6767:6767
+    networks:
+      - media
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ}
+    volumes:
+      - ./appdata/jellyseerr:/app/config
+    ports:
+      - 5055:5055
+    networks:
+      - media
+
+  # ---------------------------------------------------------------------------
+  # Port-sync is no longer a separate service. It runs as a Docker mod inside
+  # the qbittorrent container above (DOCKER_MODS=...gsp-qbittorent-gluetun-sync-
+  # port-mod). The old standalone image (ghcr.io/mag37/gluetun-qbit-port-sync)
+  # is no longer published. See the qbittorrent service for configuration.
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # Remote access: DuckDNS (dynamic DNS) + Caddy (TLS reverse proxy)
+  #
+  # duckdns keeps <sub>.duckdns.org pointed at this house's public IP.
+  # caddy owns 80/443 on the host, gets free auto-renewing Let's Encrypt certs,
+  # and proxies jellyfin.<sub>.duckdns.org / requests.<sub>.duckdns.org to the
+  # local services. Router must forward TCP 80 + 443 -> 192.168.1.64.
+  # ---------------------------------------------------------------------------
+
+  duckdns:
+    image: lscr.io/linuxserver/duckdns:latest
+    container_name: duckdns
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - SUBDOMAINS=${DUCKDNS_SUBDOMAIN}   # just the label, no ".duckdns.org"
+      - TOKEN=${DUCKDNS_TOKEN}
+      - UPDATE_IP=ipv4                    # AT&T hands out a real public v4 here
+      - LOG_FILE=false
+    volumes:
+      - ./appdata/duckdns:/config
+    networks:
+      - media
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    # host networking: binds :80/:443 directly and reaches every service
+    # (native Jellyfin included) on 127.0.0.1, so no NAT hairpin and clean
+    # client IPs in X-Forwarded-For.
+    network_mode: host
+    depends_on:
+      - duckdns
+    environment:
+      - DUCKDNS_SUBDOMAIN=${DUCKDNS_SUBDOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./appdata/caddy/data:/data      # certificates + ACME account (keep!)
+      - ./appdata/caddy/config:/config
+
+networks:
+  media:
+    name: media
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

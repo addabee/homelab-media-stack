@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+
+# Per-container state: databases, API keys, caches, logs
+appdata/
+
+# Local backups
+*.bak
+*.bak-*
+*.orig
+
+# Editor / OS noise
+.DS_Store
+*.swp

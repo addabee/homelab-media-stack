@@ -1,0 +1,61 @@
+# /mnt/calculon/media-stack/caddy/Caddyfile
+#
+# Public entrypoint for the media stack.
+#
+#   Internet --> AT&T gateway (80/443 forwarded) --> 192.168.1.64 --> Caddy
+#   Caddy terminates TLS (free Let's Encrypt certs, auto-renewed) and proxies
+#   to the local services. Caddy runs with network_mode: host, so everything
+#   downstream is reachable on 127.0.0.1 at its published port.
+#
+# DNS: DuckDNS wildcards, so *.${DUCKDNS_SUBDOMAIN}.duckdns.org all resolve to
+# the single A record the duckdns container keeps updated. One record, many
+# hostnames -- no extra DNS setup per service.
+#
+# ONLY Jellyfin and Jellyseerr are published. The *arr apps and qBittorrent
+# stay LAN-only on purpose (see the commented block at the bottom).
+
+{
+	email {$ACME_EMAIL}
+}
+
+# Shared hardening applied to every public site below.
+(secure) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+# --- Jellyfin (native on the host, :8096) ----------------------------------
+jellyfin.{$DUCKDNS_SUBDOMAIN}.duckdns.org {
+	import secure
+	# Jellyfin streams large files and uses websockets for sync/remote control;
+	# Caddy proxies both without extra config.
+	reverse_proxy 127.0.0.1:8096
+}
+
+# --- Jellyseerr (request portal, container :5055) ---------------------------
+requests.{$DUCKDNS_SUBDOMAIN}.duckdns.org {
+	import secure
+	reverse_proxy 127.0.0.1:5055
+}
+
+# --- Admin apps: deliberately NOT exposed -----------------------------------
+# Sonarr / Radarr / Prowlarr / Bazarr / qBittorrent have weak-to-no auth by
+# default and a bad CVE history. Reach them over the LAN, or from outside via
+# Tailscale/WireGuard -- not through this proxy.
+#
+# If you ever decide otherwise, uncomment and set a hash first:
+#     docker run --rm caddy:2 caddy hash-password --plaintext 'yourpassword'
+#
+# sonarr.{$DUCKDNS_SUBDOMAIN}.duckdns.org {
+# 	import secure
+# 	basic_auth {
+# 		<username> <PASTE-HASH-HERE>
+# 	}
+# 	reverse_proxy 127.0.0.1:8989
+# }

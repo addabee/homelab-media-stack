@@ -370,21 +370,52 @@ How it hangs together:
 - `docker compose pull && docker compose up -d` picks up Caddy/Jellyfin security
   fixes; worth doing monthly now that something is internet-facing.
 
+## Transcoding: software by choice
+
+Jellyfin on this host transcodes in **software only** — `HardwareAccelerationType`
+is `none`, `EncodingThreadCount` is capped at 8 of 24 threads.
+
+That is a deliberate trade, not a missing feature. The RTX 4070 is dedicated to
+paid GPU compute rentals, and a GPU cannot be meaningfully shared between a
+tenant's CUDA workload and Jellyfin's NVENC sessions: whoever gets there second
+fails. Reserving the card entirely keeps it sellable and keeps playback
+predictable. The thread cap exists for the same reason — CPU cores are rented
+alongside the GPU, so an unbounded transcode would degrade a paying workload.
+
+Two profiles live side by side, and `apply-jellyfin-gpu.sh` still switches
+between them:
+
+| Profile | Used when |
+|---|---|
+| `jellyfin-encoding.cpu.xml` | **current** — x264 `veryfast`, no hwaccel, 8 threads |
+| `jellyfin-encoding.optimized.xml` | rollback if GPU renting ever stops — NVENC h264/hevc/av1, enhanced NVDEC, bt2390 CUDA tone-mapping |
+
+The GPU path is fully working and verified against
+`/usr/lib/jellyfin-ffmpeg/ffmpeg` (driver 595-server open, plus
+`libnvidia-encode/decode-595-server`); it is simply not in use.
+
+### The arbiter, and why it was retired
+
+`jellyfin-gpu-arbiter.sh` automates the middle ground: it polls for GPU
+tenancy — primarily any container holding a `DeviceRequests` GPU claim, with a
+foreign-CUDA-process check as a second signal — and swaps Jellyfin between the
+two profiles, debouncing across two polls so a momentary blip cannot trigger a
+switch. It was built, tested in both directions, and then **retired**: every
+switch restarts Jellyfin, which drops any stream in progress. Trading a
+predictable software transcode for an unpredictable mid-episode disconnect was
+the wrong way round. It is kept, disabled, for anyone whose GPU is only
+occasionally rented.
+
+Install it with `jellyfin-gpu-arbiter-install.sh` if that trade suits you better.
+
+> One gotcha worth recording: Jellyfin **rewrites `encoding.xml` on startup**
+> and silently discards values it cannot parse — a hand-written
+> `<EncoderPreset>veryfast</EncoderPreset>` came back as `xsi:nil`. Derive new
+> profiles from a file Jellyfin itself has written, and always re-read the file
+> after restarting to confirm your settings actually persisted.
+
 ## Notes / TODO
 
-- **GPU transcoding**: host has an NVIDIA RTX 4070 (Ada). Driver 595-server
-  (open) + `libnvidia-encode/decode-595-server` + `nvidia-utils-595-server`
-  are installed; NVENC h264/hevc/av1 and the full CUDA decode→tonemap→encode
-  pipeline verified against `/usr/lib/jellyfin-ffmpeg/ffmpeg`.
-  Apply the optimized transcoding profile + RAM transcode scratch with:
-  ```
-  sudo bash /mnt/calculon/media-stack/apply-jellyfin-gpu.sh
-  ```
-  Installs `jellyfin-encoding.optimized.xml` to `/etc/jellyfin/encoding.xml`
-  (timestamped backup kept), enables nvenc/enhanced-NVDEC, HEVC+AV1 output,
-  bt2390 CUDA tone-mapping, transcode throttling + segment deletion, bwdif
-  deinterlace, and mounts `/var/cache/jellyfin/transcodes` as tmpfs (8G).
-  Roll back: `sudo bash apply-jellyfin-gpu.sh --restore`.
 - `.env` contains a live credential. It is `chmod 600`. Don't copy it into a
   git repo or a shared location.
 - Update everything: `cd /mnt/calculon/media-stack && docker compose pull && docker compose up -d`.

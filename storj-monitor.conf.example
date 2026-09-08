@@ -4,9 +4,12 @@
 NTFY_SERVER=https://ntfy.sh
 NTFY_TOPIC=
 
-# Optional: have ntfy forward each alert to this address as well. Useful if you
-# don't want a push app installed. Leave blank to disable.
+# Optional: have ntfy forward each alert to this address as well.
+# NOTE: ntfy.sh REJECTS anonymous email sending (HTTP 400). This only works with
+# a free ntfy.sh account plus an access token in NTFY_TOKEN below. Leaving
+# NTFY_EMAIL set without a token breaks ALL notifications, not just email.
 NTFY_EMAIL=
+NTFY_TOKEN=
 
 # To use something else instead (Discord/Slack webhook, Telegram, a local
 # script), set NOTIFY_CMD. It receives the alert body on stdin and the title

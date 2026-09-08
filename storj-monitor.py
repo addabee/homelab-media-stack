@@ -16,7 +16,10 @@ DATA_DIR   = "/mnt/calculon/storj/data"
 CFG = {
     "NTFY_SERVER":       "https://ntfy.sh",
     "NTFY_TOPIC":        "",       # set in conf file
-    "NTFY_EMAIL":        "",       # optional: ntfy forwards the alert to this address
+    "NTFY_EMAIL":        "",       # optional: ntfy forwards to this address. REQUIRES an
+                                   # ntfy account + NTFY_TOKEN -- ntfy.sh rejects
+                                   # anonymous email sending with HTTP 400.
+    "NTFY_TOKEN":        "",       # ntfy access token, needed only for NTFY_EMAIL
     "NOTIFY_CMD":        "",       # optional: overrides ntfy; gets body on stdin, title as $1
     "PING_MAX_MIN":      "20",     # satellites should ping well inside this
     "DISK_USED_PCT":     "90",     # alert when allocation this full
@@ -41,6 +44,8 @@ def notify(title, body, priority="default"):
         # reach you with no app installed.
         if CFG["NTFY_EMAIL"]:
             headers["Email"] = CFG["NTFY_EMAIL"]
+        if CFG["NTFY_TOKEN"]:
+            headers["Authorization"] = f'Bearer {CFG["NTFY_TOKEN"]}'
         req = urllib.request.Request(
             f'{CFG["NTFY_SERVER"].rstrip("/")}/{CFG["NTFY_TOPIC"]}',
             data=body.encode("utf-8"),
@@ -51,6 +56,23 @@ def notify(title, body, priority="default"):
             print(f"notify failed: {e}", file=sys.stderr)
         return
     print(f"[{title}] {body}", file=sys.stderr)
+
+if "--selftest" in sys.argv:
+    # The failure mode this exists for: a misconfigured notifier fails silently,
+    # leaving a monitor that looks healthy and can never reach you.
+    print("sending a test alert through the real notify() path...")
+    ok = {"v": True}
+    _orig = notify
+    def notify(title, body, priority="default"):      # noqa: F811
+        try:
+            _orig(title, body, priority)
+        except Exception as e:
+            ok["v"] = False; print(f"  FAILED: {e}")
+    notify("storj-monitor selftest",
+           "If you are reading this, alerts can reach you.", "default")
+    print("  posted -- confirm you actually received it." if ok["v"]
+          else "  DELIVERY FAILED -- alerts would not reach you.")
+    sys.exit(0 if ok["v"] else 1)
 
 problems = {}   # key -> human message
 def flag(key, msg): problems[key] = msg

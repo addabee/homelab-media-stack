@@ -12,3 +12,6 @@ appdata/
 # Editor / OS noise
 .DS_Store
 *.swp
+
+# Real monitor config (holds the ntfy topic)
+storj-monitor.conf

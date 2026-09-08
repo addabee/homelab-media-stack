@@ -370,49 +370,84 @@ How it hangs together:
 - `docker compose pull && docker compose up -d` picks up Caddy/Jellyfin security
   fixes; worth doing monthly now that something is internet-facing.
 
-## Transcoding: software by choice
+## Transcoding
 
-Jellyfin on this host transcodes in **software only** — `HardwareAccelerationType`
-is `none`, `EncodingThreadCount` is capped at 8 of 24 threads.
-
-That is a deliberate trade, not a missing feature. The RTX 4070 is dedicated to
-paid GPU compute rentals, and a GPU cannot be meaningfully shared between a
-tenant's CUDA workload and Jellyfin's NVENC sessions: whoever gets there second
-fails. Reserving the card entirely keeps it sellable and keeps playback
-predictable. The thread cap exists for the same reason — CPU cores are rented
-alongside the GPU, so an unbounded transcode would degrade a paying workload.
-
-Two profiles live side by side, and `apply-jellyfin-gpu.sh` still switches
-between them:
-
-| Profile | Used when |
-|---|---|
-| `jellyfin-encoding.cpu.xml` | **current** — x264 `veryfast`, no hwaccel, 8 threads |
-| `jellyfin-encoding.optimized.xml` | rollback if GPU renting ever stops — NVENC h264/hevc/av1, enhanced NVDEC, bt2390 CUDA tone-mapping |
-
-The GPU path is fully working and verified against
+Jellyfin uses **NVENC hardware transcoding** on the RTX 4070 — the full CUDA
+decode → tone-map → encode pipeline, verified against
 `/usr/lib/jellyfin-ffmpeg/ffmpeg` (driver 595-server open, plus
-`libnvidia-encode/decode-595-server`); it is simply not in use.
+`libnvidia-encode/decode-595-server`). Apply it with:
 
-### The arbiter, and why it was retired
+```
+sudo bash apply-jellyfin-gpu.sh          # --restore to roll back
+```
 
-`jellyfin-gpu-arbiter.sh` automates the middle ground: it polls for GPU
-tenancy — primarily any container holding a `DeviceRequests` GPU claim, with a
-foreign-CUDA-process check as a second signal — and swaps Jellyfin between the
-two profiles, debouncing across two polls so a momentary blip cannot trigger a
-switch. It was built, tested in both directions, and then **retired**: every
-switch restarts Jellyfin, which drops any stream in progress. Trading a
-predictable software transcode for an unpredictable mid-episode disconnect was
-the wrong way round. It is kept, disabled, for anyone whose GPU is only
-occasionally rented.
+That installs `jellyfin-encoding.optimized.xml`, enables enhanced NVDEC,
+HEVC + AV1 output, bt2390 CUDA tone-mapping, transcode throttling and segment
+deletion, and mounts `/var/cache/jellyfin/transcodes` as an 8 GB tmpfs.
 
-Install it with `jellyfin-gpu-arbiter-install.sh` if that trade suits you better.
+### Sharing the GPU with other workloads
+
+A GPU cannot be meaningfully shared between Jellyfin's NVENC sessions and
+another tenant's CUDA workload — whoever arrives second fails. Two pieces exist
+for hosts that need to give the card up sometimes:
+
+| File | Purpose |
+|---|---|
+| `jellyfin-encoding.cpu.xml` | Software profile — x264 `veryfast`, no hwaccel, thread-capped |
+| `jellyfin-gpu-arbiter.sh` | Polls for GPU tenancy and swaps profiles automatically |
+
+The arbiter detects a tenant primarily by any container holding a
+`DeviceRequests` GPU claim, with a foreign-CUDA-process check as a second
+signal, and debounces across two polls so a momentary blip cannot trigger a
+switch. It is **disabled by default**: every switch restarts Jellyfin, dropping
+streams in progress, so it is only worth running if the card is genuinely
+contended. Install with `jellyfin-gpu-arbiter-install.sh`.
+
+The CPU profile caps `EncodingThreadCount` rather than leaving it unbounded, so
+a transcode cannot starve whatever else shares the machine.
 
 > One gotcha worth recording: Jellyfin **rewrites `encoding.xml` on startup**
 > and silently discards values it cannot parse — a hand-written
 > `<EncoderPreset>veryfast</EncoderPreset>` came back as `xsi:nil`. Derive new
 > profiles from a file Jellyfin itself has written, and always re-read the file
 > after restarting to confirm your settings actually persisted.
+
+## Storj node monitoring
+
+The host also runs a Storj storage node, sharing the array with the media
+libraries. `storj-monitor.py` watches it and pushes alerts via
+[ntfy](https://ntfy.sh):
+
+| Check | Why it matters |
+|---|---|
+| Storage array mounted | The array is mounted `nofail`, so the host boots without it — the node would then fail every audit |
+| Array free space | A full disk fails audits |
+| Dashboard reachable | Container stopped |
+| QUIC status | Catches a silently broken port forward, e.g. after a DHCP lease moves |
+| Satellite contact age | No ping in 20 min means unreachable from the internet |
+| Allocation full | |
+| Disqualified / suspended | Suspension is the warning before the permanent one |
+| Audit / suspension / online scores | Below threshold |
+| Node version | Out of date |
+
+Two design decisions worth calling out:
+
+**It alerts only on state changes.** One message when something breaks, one when
+it clears. A monitor that re-reports the same problem every 15 minutes becomes
+noise you learn to ignore, which is the same as having no monitor.
+
+**It lives on the root filesystem, not the array.** Putting it beside the node's
+data would mean it disappears exactly when the array fails to mount — unable to
+report the one failure most likely to disqualify the node.
+
+```
+bash storj-monitor-install.sh    # no root needed
+```
+
+The installer generates a random ntfy topic (the topic name is the only access
+control, so it must be unguessable) and adds a 15-minute cron entry. Thresholds
+and the alert channel live in `~/.config/storj-monitor.conf` — set `NOTIFY_CMD`
+there to route alerts to a Discord/Slack webhook or anything else instead.
 
 ## Notes / TODO
 

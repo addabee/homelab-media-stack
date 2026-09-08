@@ -1,0 +1,20 @@
+# storj-monitor configuration
+# Alerts go to ntfy.sh by default. The topic name is the ONLY access control —
+# anyone who knows it can read your alerts, so keep it private.
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOPIC=
+
+# Optional: have ntfy forward each alert to this address as well. Useful if you
+# don't want a push app installed. Leave blank to disable.
+NTFY_EMAIL=
+
+# To use something else instead (Discord/Slack webhook, Telegram, a local
+# script), set NOTIFY_CMD. It receives the alert body on stdin and the title
+# in $STORJ_TITLE, and takes precedence over ntfy. Example:
+# NOTIFY_CMD=curl -s -X POST -H 'Content-Type: application/json' -d "$(jq -Rs '{content:.}')" https://discord.com/api/webhooks/...
+
+# Thresholds
+PING_MAX_MIN=20
+DISK_USED_PCT=90
+ARRAY_FREE_MIN_GB=250
+SCORE_MIN=0.96

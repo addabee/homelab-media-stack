@@ -21,3 +21,8 @@ PING_MAX_MIN=20
 DISK_USED_PCT=90
 ARRAY_FREE_MIN_GB=250
 SCORE_MIN=0.96
+
+# Pop a local desktop notification as well as the remote alert. Additive, not a
+# replacement. No-op when there is no graphical session, so it is safe to leave
+# on for a headless host.
+DESKTOP_NOTIFY=1

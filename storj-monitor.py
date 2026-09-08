@@ -20,6 +20,7 @@ CFG = {
                                    # ntfy account + NTFY_TOKEN -- ntfy.sh rejects
                                    # anonymous email sending with HTTP 400.
     "NTFY_TOKEN":        "",       # ntfy access token, needed only for NTFY_EMAIL
+    "DESKTOP_NOTIFY":    "1",      # also pop a local desktop notification (no-op headless)
     "NOTIFY_CMD":        "",       # optional: overrides ntfy; gets body on stdin, title as $1
     "PING_MAX_MIN":      "20",     # satellites should ping well inside this
     "DISK_USED_PCT":     "90",     # alert when allocation this full
@@ -33,7 +34,33 @@ if os.path.exists(CONF_FILE):
             k, v = line.split("=", 1)
             CFG[k.strip()] = v.strip().strip('"').strip("'")
 
+def desktop_notify(title, body, priority):
+    """Pop a local desktop notification. Additive -- never replaces the remote
+    channel. Silently does nothing when there is no graphical session, which is
+    the normal case on a headless host or when nobody is logged in.
+
+    cron gives us no DBUS_SESSION_BUS_ADDRESS, so point it at the user's runtime
+    bus explicitly or notify-send has nothing to talk to."""
+    if CFG["DESKTOP_NOTIFY"].strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    if not shutil.which("notify-send"):
+        return
+    bus = f"/run/user/{os.getuid()}/bus"
+    if not os.path.exists(bus):
+        return
+    env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=f"unix:path={bus}")
+    # critical notifications persist until dismissed; recovery messages should not
+    urgency = "critical" if priority == "high" else "normal"
+    try:
+        subprocess.run(["notify-send", "-u", urgency, "-a", "storj-monitor",
+                        title, body], env=env, timeout=10, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def notify(title, body, priority="default"):
+    desktop_notify(title, body, priority)
     if CFG["NOTIFY_CMD"]:
         subprocess.run(CFG["NOTIFY_CMD"], shell=True, input=f"{title}\n{body}".encode(),
                        env={**os.environ, "STORJ_TITLE": title})

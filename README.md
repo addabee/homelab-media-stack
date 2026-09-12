@@ -172,6 +172,10 @@ docker compose exec gluetun sh -c 'cat /tmp/gluetun/forwarded_port'  # the port 
   `docker compose logs qbittorrent`. Log in, set a real password.
   - Options → Downloads: default save path `/data/downloads/complete`,
     keep incomplete in `/data/downloads/incomplete`.
+  - `configure-qbittorrent.sh` will **not** overwrite that password. It only
+    sets the login when `.env` provides `QBITTORRENT_PASSWORD_PBKDF2` (see
+    `.env.example` for the generator). No credential belongs in this repo —
+    it is public.
   - Options → Connection: **untick** "Use random port" and disable UPnP.
     You do **not** need to set the listen port by hand — the GSP mod keeps it
     equal to PIA's `forwarded_port` (see step 6).

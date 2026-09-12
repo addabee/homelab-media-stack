@@ -1,14 +1,15 @@
 # Self-Hosted Media Stack
 
-A production media server on a single Linux host: nine containerized services
+A production media server on a single Linux host: eleven containerized services
 behind a VPN killswitch, with automatic TLS, hardware-accelerated transcoding,
 and hardlink-based library imports.
 
 Runs 24/7 on consumer hardware — Ryzen 9 3900X, RTX 4070, 7.3 TB array. Two
-services are reachable from the internet; the other seven deliberately are not.
+services are reachable from the internet; the other nine deliberately are not.
 
 **Stack:** Docker Compose · Caddy · Jellyfin · gluetun (OpenVPN) · qBittorrent ·
-Sonarr · Radarr · Prowlarr · Bazarr · Jellyseerr · DuckDNS · Python · Bash · ufw
+Sonarr · Radarr · Lidarr · Prowlarr · Bazarr · Jellyseerr · Recyclarr · DuckDNS ·
+Python · Bash · ufw
 
 ## Architecture
 
@@ -32,8 +33,9 @@ Sonarr · Radarr · Prowlarr · Bazarr · Jellyseerr · DuckDNS · Python · Bas
                        │                │
                        │                ▼
                        │   ┌──────────────────────────┐
-                       │   │ Sonarr · Radarr          │  LAN only —
+                       │   │ Sonarr · Radarr · Lidarr │  LAN only —
                        │   │ Prowlarr · Bazarr        │  never proxied
+                       │   │ Recyclarr (quality sync) │
                        │   └────────────┬─────────────┘
                        │                │
                        │                ▼
@@ -75,6 +77,12 @@ reconnect, which would otherwise silently kill torrent connectivity. A mod
 running inside the qBittorrent container watches gluetun's control API and
 rewrites the listen port on change — no cron job, no separate container.
 
+**Quality policy is code, not clicks.** Quality definitions, quality profiles
+and custom formats are declared in [`recyclarr/recyclarr.yml`](recyclarr/recyclarr.yml)
+and pushed into Sonarr and Radarr by the `recyclarr` container on a daily
+schedule. Editing a profile in the *arr web UI is pointless — the next sync
+overwrites it. Change the file instead.
+
 **Transcoding runs on the GPU.** The full CUDA decode → tone-map → encode
 pipeline is verified against Jellyfin's bundled ffmpeg, with NVENC h264/hevc/av1
 and a tmpfs transcode scratch to keep churn off the array.
@@ -89,9 +97,11 @@ and a tmpfs transcode scratch to keep churn off the array.
 | Prowlarr | container | `:9696` — indexer manager |
 | Sonarr | container | `:8989` — TV |
 | Radarr | container | `:7878` — movies |
-| Bazarr | container | `:6767` — subtitles |
+| Lidarr | container | `:8686` — music |
+| Bazarr | container | `:6767` — subtitles (English) |
 | Jellyseerr | container | `:5055` — request portal |
 | FlareSolverr | container, via gluetun | `:8191` — Cloudflare solver for Prowlarr |
+| Recyclarr | container | no port — syncs TRaSH quality profiles/custom formats into Sonarr + Radarr daily |
 
 ## Directory layout
 
@@ -175,9 +185,24 @@ docker compose exec gluetun sh -c 'cat /tmp/gluetun/forwarded_port'  # the port 
   and Radarr `http://radarr:7878` (paste each app's API key) so indexers sync.
 - **Sonarr / Radarr** — Media Management → Root Folder `/data/media/tv` and
   `/data/media/movies`. Add qBittorrent at `http://gluetun:8080`.
+- **Lidarr** `:8686` — Media Management → Root Folder `/data/media/music`. Add
+  qBittorrent at `http://gluetun:8080` with category `music`. Profile: prefer
+  **FLAC**, allow **MP3-320** as fallback, upgrade until FLAC — so a gap is
+  filled now and replaced with lossless when one shows up. Prowlarr → Settings →
+  Apps: add Lidarr `http://lidarr:8686` so indexers sync to it too.
 - **Bazarr** — point at Sonarr `http://sonarr:8989` / Radarr `http://radarr:7878`.
+  Languages → add **English** and create a language profile using it; set it as
+  the default for both Series and Movies, otherwise Bazarr fetches nothing.
 - **Jellyseerr** `:5055` — connect to Jellyfin at `http://192.168.1.64:8096`,
   then to Sonarr/Radarr by container name.
+  - **Every request is manually approved.** Users → General Settings: leave
+    *Auto-Approve* and *Auto-Request* **off** for all non-admin users, and do not
+    grant the `AUTO_APPROVE` permission. Requests then queue under *Pending* for
+    you. This is the only thing standing between a shared login and a full array.
+  - Settings → Services: point the Radarr entry at the **Movies (4K preferred)**
+    profile and the Sonarr entry at **WEB-1080p**. Do not tick "4K Server" —
+    there is no second instance, the single movie profile handles both
+    resolutions.
 - **Jellyfin** — add libraries pointing at `/mnt/calculon/media/movies`,
   `/mnt/calculon/media/tv`, `/mnt/calculon/media/music`.
 
@@ -207,6 +232,52 @@ The last two should show the same number.
 The old standalone `gluetun-qb-portsync` service (image
 `ghcr.io/mag37/gluetun-qbit-port-sync`) is gone — that image is no longer
 published. `QBITTORRENT_PASSWORD` in `.env` is unused by this setup.
+
+## Quality profiles (Recyclarr)
+
+Quality is declared once in [`recyclarr/recyclarr.yml`](recyclarr/recyclarr.yml)
+and synced into Sonarr and Radarr daily. **Editing a profile in the *arr web UI
+does nothing lasting** — the next sync overwrites it.
+
+| | Policy |
+|---|---|
+| **TV** | 1080p only. Stock TRaSH `WEB-1080p` profile, no 4K tier, one Sonarr |
+| **Movies** | 2160p preferred, 1080p accepted and **upgraded in place** when a 4K release later appears |
+| **Both** | Direct-play first — prefer releases that stream without a transcode |
+
+Two things worth understanding about the movie profile:
+
+**It is hand-built, not a template.** TRaSH ships single-resolution profiles
+only; its guide says they "can be combined into a single Quality Profile if you
+want to be able to upgrade from 1080p to 4K/2160p when and if it becomes
+available after the 1080p release is made." That combination is what
+`movies-4k-preferred` does — custom `qualities:` tiers, `upgrade.until_quality:
+Bluray-2160p` — while still pulling its custom formats from TRaSH.
+
+**`Remux-2160p` is deliberately excluded.** 40–80 GB per film defeats
+direct-play on anything not wired to the TV, and the array is shared with a
+Storj node. The tier is present but commented out in the config.
+
+### Setup
+
+```
+cd /mnt/calculon/media-stack
+
+# 1. put the two API keys in .env (see .env.example for the one-liner)
+# 2. dry-run — writes nothing, prints every change it *would* make
+docker compose run --rm recyclarr sync --preview
+
+# 3. apply, then leave it running on its daily schedule
+docker compose run --rm recyclarr sync
+docker compose up -d recyclarr
+```
+
+Always `--preview` first. `reset_unmatched_scores` is enabled, so a sync zeroes
+custom-format scores it does not manage — on a profile you hand-edited, that is
+a real change and you want to see it before it happens.
+
+Check it took: Radarr → Settings → Profiles should list **Movies (4K
+preferred)**; Sonarr → Settings → Profiles should list **WEB-1080p**.
 
 ## Remote access (DuckDNS + Caddy)
 
@@ -371,6 +442,21 @@ How it hangs together:
   fixes; worth doing monthly now that something is internet-facing.
 
 ## Transcoding
+
+> **Check which profile is actually live before trusting this section.** The
+> host ran the software profile for the period the RTX 4070 was rented out for
+> paid compute (commit `a240f6d`), and the docs and the box drifted apart while
+> that was true. The file is the only authority:
+>
+> ```
+> grep -o '<HardwareAccelerationType>[^<]*' /etc/jellyfin/encoding.xml
+> #   nvenc  -> GPU profile live (jellyfin-encoding.optimized.xml)
+> #   none   -> CPU profile live (jellyfin-encoding.cpu.xml), run apply-jellyfin-gpu.sh
+> grep -o '<EncodingThreadCount>[^<]*' /etc/jellyfin/encoding.xml   # 8 = CPU profile's cap
+> ```
+>
+> Re-read it after every Jellyfin restart: Jellyfin rewrites `encoding.xml` on
+> startup and silently discards values it cannot parse.
 
 Jellyfin uses **NVENC hardware transcoding** on the RTX 4070 — the full CUDA
 decode → tone-map → encode pipeline, verified against

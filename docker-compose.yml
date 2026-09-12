@@ -6,13 +6,17 @@
 #   - gluetun  = VPN gateway (PIA / WireGuard + port forwarding)
 #   - qbittorrent + flaresolverr route ALL traffic through gluetun
 #     (network_mode: service:gluetun) -> no leak if the VPN drops
-#   - prowlarr / sonarr / radarr / bazarr / jellyseerr sit on the normal
-#     bridge and reach the VPN-bound services via the "gluetun" hostname
+#   - prowlarr / sonarr / radarr / lidarr / bazarr / jellyseerr / recyclarr sit
+#     on the normal bridge and reach the VPN-bound services via the "gluetun"
+#     hostname
 #
 # Paths: everything shares /mnt/calculon mounted as /data so Sonarr/Radarr
 # import from downloads -> library as instant hardlinks (no copy).
 #   /data/downloads/{incomplete,complete}   <- qBittorrent
 #   /data/media/{movies,tv,music}           <- library (Jellyfin reads these)
+#
+# Quality policy lives in ./recyclarr/recyclarr.yml, synced daily by the
+# recyclarr service: TV 1080p only; movies 2160p preferred with 1080p fallback.
 
 services:
   gluetun:
@@ -145,6 +149,22 @@ services:
     networks:
       - media
 
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./appdata/lidarr:/config
+      - /mnt/calculon:/data
+    ports:
+      - 8686:8686
+    networks:
+      - media
+
   jellyseerr:
     image: fallenbagel/jellyseerr:latest
     container_name: jellyseerr
@@ -156,6 +176,32 @@ services:
       - ./appdata/jellyseerr:/app/config
     ports:
       - 5055:5055
+    networks:
+      - media
+
+  # ---------------------------------------------------------------------------
+  # Recyclarr: pulls TRaSH-Guides quality definitions, quality profiles and
+  # custom formats into Sonarr and Radarr. Runs on CRON_SCHEDULE, then exits
+  # until the next tick -- it is not a long-lived service.
+  #
+  # Config: ./recyclarr/recyclarr.yml  (in git; holds no secrets)
+  # Secrets: SONARR_API_KEY / RADARR_API_KEY from .env
+  #
+  # Dry-run before trusting a change:
+  #   docker compose run --rm recyclarr sync --preview
+  # ---------------------------------------------------------------------------
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:8
+    container_name: recyclarr
+    restart: unless-stopped
+    user: ${PUID}:${PGID}
+    volumes:
+      - ./recyclarr:/config
+    environment:
+      - TZ=${TZ}
+      - CRON_SCHEDULE=@daily
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - RADARR_API_KEY=${RADARR_API_KEY}
     networks:
       - media
 

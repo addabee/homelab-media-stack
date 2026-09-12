@@ -74,8 +74,19 @@ for u in "https://jellyfin.$HOST/health" "https://requests.$HOST/"; do
 done
 
 echo "8. things that must NOT be public"
-for p in 8989 7878 9696 6767 8080 8096; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://$PUBIP:$p/")
-  [ "$code" = "000" ] && ok "port $p closed from outside" \
-    || bad "port $p ANSWERED ($code) -- remove that forward on the router"
-done
+# A blank PUBIP would make every URL below "http://:PORT/", which curl rejects
+# with code 000 -- indistinguishable from a closed port. Reporting "closed"
+# without having tested anything is the one failure this check must not have.
+if [ -z "${PUBIP:-}" ]; then
+  bad "public IP unknown (step 4 failed) -- admin ports NOT checked"
+  echo "       re-run when 'curl -4 -s https://ifconfig.me' works, or test from"
+  echo "       outside the LAN:  nmap -Pn -p 8989,7878,9696,6767,8080,8096 <your-ip>"
+else
+  for p in 8989 7878 9696 6767 8080 8096; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://$PUBIP:$p/")
+    [ "$code" = "000" ] && ok "port $p closed from outside" \
+      || bad "port $p ANSWERED ($code) -- remove that forward on the router"
+  done
+  warn "run from inside the LAN, so a '000' can also mean your router has no NAT"
+  echo "       loopback rather than that the port is shut. Confirm from cell data."
+fi

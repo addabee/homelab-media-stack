@@ -108,9 +108,19 @@ media/music/
 - Series Folder Format: `{Series TitleYear}`
 - Root Folder: `/data/media/tv`
 
+**Quality profiles are NOT set here.** They live in
+[`recyclarr/recyclarr.yml`](recyclarr/recyclarr.yml) and are pushed in daily by
+the `recyclarr` container, which overwrites UI edits:
+
+| App | Profile | Policy |
+|---|---|---|
+| Sonarr | `WEB-1080p` (TRaSH) | 1080p only, no 4K tier |
+| Radarr | `Movies (4K preferred)` (hand-built) | 2160p preferred, 1080p fallback, upgraded in place; `Remux-2160p` excluded |
+| Lidarr | set in the UI | FLAC preferred, MP3-320 fallback |
+
 **Both → Settings → Download Clients → qBittorrent**
 - Host `gluetun`, Port `8080`
-- Category: `radarr` (Radarr) / `sonarr` (Sonarr)
+- Category: `radarr` (Radarr) / `sonarr` (Sonarr) / `music` (Lidarr)
 - Leave "Remove completed" on so hardlinked torrents are cleaned up after import.
 
 **Jellyfin → Dashboard → Libraries → Add Media Library**

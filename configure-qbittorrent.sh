@@ -15,6 +15,19 @@ CATS=appdata/qbittorrent/qBittorrent/categories.json
 
 command -v docker >/dev/null || { echo "docker not found"; exit 1; }
 
+# Web UI credentials are NOT stored in this repo -- it is public. If .env sets
+# QBITTORRENT_PASSWORD_PBKDF2 we write it; otherwise the existing password in
+# qBittorrent.conf is left exactly as it is. See .env.example for how to
+# generate the hash.
+envget(){ sed -nE "s/^$1=(.*)$/\1/p" ./.env 2>/dev/null | tail -1; }
+QB_PBKDF2="$(envget QBITTORRENT_PASSWORD_PBKDF2)"
+QB_USER="$(envget QBITTORRENT_USERNAME)"; QB_USER="${QB_USER:-admin}"
+if [ -n "$QB_PBKDF2" ]; then
+  echo "== Web UI password: setting from .env (user: $QB_USER) =="
+else
+  echo "== Web UI password: leaving as-is (QBITTORRENT_PASSWORD_PBKDF2 unset) =="
+fi
+
 echo "== reading forwarded port from gluetun =="
 PORT="$(docker compose exec -T gluetun cat /tmp/gluetun/forwarded_port 2>/dev/null | tr -dc 0-9 || true)"
 [ -n "${PORT:-}" ] || PORT=21524
@@ -26,9 +39,11 @@ docker compose stop qbittorrent
 cp -a "$CONF" "$CONF.bak.$(date +%s)"
 
 echo "== patching $CONF =="
-PORT="$PORT" python3 - "$CONF" <<'PY'
+PORT="$PORT" QB_PBKDF2="$QB_PBKDF2" QB_USER="$QB_USER" python3 - "$CONF" <<'PY'
 import os, sys
 port = os.environ["PORT"]
+qb_pbkdf2 = os.environ.get("QB_PBKDF2", "")
+qb_user = os.environ.get("QB_USER", "admin")
 path = sys.argv[1]
 want = {
   "BitTorrent": {
@@ -53,11 +68,16 @@ want = {
     r"WebUI\AuthSubnetWhitelistEnabled": "true",
     r"WebUI\AuthSubnetWhitelist": "172.28.0.0/24",
     r"WebUI\HostHeaderValidation": "false",
-    # WebUI login: user "admin", password set below (PBKDF2-HMAC-SHA512, 100k iters)
-    r"WebUI\Username": "admin",
-    r"WebUI\Password_PBKDF2": '"@ByteArray(6sGuSzPbHi8TfZTNB037IA==:oo9tdH/QEjefewEz3uUY2TFO7JUrI99SPHCNh1AfSrw8QD+ohg+y9AaDMMy7/Pz7006Fuo0zm93fWut0ShoIjA==)"',
   },
 }
+
+# Only touch the login when .env supplies a hash. Never hardcode one here:
+# this repo is public, so a committed hash is a published credential and
+# would silently overwrite the password set through the Web UI.
+if qb_pbkdf2:
+    want["Preferences"][r"WebUI\Username"] = qb_user
+    want["Preferences"][r"WebUI\Password_PBKDF2"] = f'"{qb_pbkdf2}"'
+
 lines = open(path).read().splitlines()
 out, sec, seen = [], None, {k: set() for k in want}
 
@@ -112,6 +132,7 @@ qBittorrent is now configured:
     manual   -> /data/downloads/complete/manual
   Automatic Torrent Management: ON by default (category = location)
   listen port: $PORT
+  Web UI login: ${QB_PBKDF2:+set from .env (user: $QB_USER)}${QB_PBKDF2:-unchanged}
 
 Web UI: http://192.168.1.64:8080  (Tools -> Options -> BitTorrent: confirm
 "Automatic Torrent Management" shows the category paths above).

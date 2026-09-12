@@ -7,17 +7,27 @@ Run from the media-server host (talks to the published ports on localhost):
 
 Idempotent: existing resources with the same name are left alone.
 Container-to-container hostnames used in the configs:
-    sonarr:8989  radarr:7878  prowlarr:9696  gluetun:8080 (qBittorrent)  gluetun:8191 (FlareSolverr)
+    sonarr:8989  radarr:7878  lidarr:8686  prowlarr:9696
+    gluetun:8080 (qBittorrent)  gluetun:8191 (FlareSolverr)
+
+Quality profiles are NOT set here -- they are owned by recyclarr/recyclarr.yml
+for Sonarr and Radarr. Lidarr's profile is still set in its web UI.
 """
 import json, sys, urllib.request, urllib.error, re, pathlib
 
 APP = "/mnt/calculon/media-stack/appdata"
 def apikey(name):
-    xml = pathlib.Path(f"{APP}/{name}/config.xml").read_text()
-    return re.search(r"<ApiKey>([^<]+)</ApiKey>", xml).group(1)
+    """Read a service's API key. Returns None if the service has never been
+    started (no config.xml yet) so one missing app cannot abort the whole run."""
+    cfg = pathlib.Path(f"{APP}/{name}/config.xml")
+    if not cfg.is_file():
+        return None
+    m = re.search(r"<ApiKey>([^<]+)</ApiKey>", cfg.read_text())
+    return m.group(1) if m else None
 
 SONARR = ("http://localhost:8989", apikey("sonarr"),  "v3")
 RADARR = ("http://localhost:7878", apikey("radarr"),  "v3")
+LIDARR = ("http://localhost:8686", apikey("lidarr"),  "v1")
 PROWL  = ("http://localhost:9696", apikey("prowlarr"),"v1")
 
 def call(base, ver, path, method="GET", body=None):
@@ -32,7 +42,16 @@ def call(base, ver, path, method="GET", body=None):
     except urllib.error.HTTPError as e:
         print(f"  ! {method} {path} -> HTTP {e.code}: {e.read().decode()[:300]}")
         return None
-call.keys = {SONARR[0]: SONARR[1], RADARR[0]: RADARR[1], PROWL[0]: PROWL[1]}
+call.keys = {SONARR[0]: SONARR[1], RADARR[0]: RADARR[1],
+             LIDARR[0]: LIDARR[1], PROWL[0]: PROWL[1]}
+
+# Lidarr is optional (guarded at its call sites); these three are not.
+_missing = [n for n, k in (("sonarr", SONARR[1]), ("radarr", RADARR[1]),
+                           ("prowlarr", PROWL[1])) if not k]
+if _missing:
+    sys.exit(f"No API key for: {', '.join(_missing)}. "
+             f"Expected <ApiKey> in {APP}/<app>/config.xml -- start the "
+             f"container and open its web UI once, then re-run.")
 
 def schema_entry(base, ver, path, impl):
     for s in call(base, ver, path) or []:
@@ -56,6 +75,26 @@ def root_folder(app, path):
     if path in existing:
         print(f"  root folder {path} already present"); return
     r = call(base, ver, "rootfolder", "POST", {"path": path})
+    print(f"  + root folder {path}" if r else f"  ! failed root folder {path}")
+
+def lidarr_root_folder(path):
+    """Lidarr's rootfolder POST needs a name plus default quality/metadata
+    profile ids -- unlike Sonarr/Radarr, a bare {"path": ...} is rejected."""
+    base, key, ver = LIDARR
+    if path in [r["path"] for r in call(base, ver, "rootfolder") or []]:
+        print(f"  root folder {path} already present"); return
+    qps = call(base, ver, "qualityprofile") or []
+    mps = call(base, ver, "metadataprofile") or []
+    if not qps or not mps:
+        print("  ! Lidarr has no quality/metadata profiles yet -- "
+              "open its UI once, then re-run"); return
+    r = call(base, ver, "rootfolder", "POST", {
+        "name": "Music", "path": path,
+        "defaultQualityProfileId": qps[0]["id"],
+        "defaultMetadataProfileId": mps[0]["id"],
+        "defaultMonitorOption": "all", "defaultNewItemMonitorOption": "all",
+        "defaultTags": [],
+    })
     print(f"  + root folder {path}" if r else f"  ! failed root folder {path}")
 
 # ------------------------------------------------------------- download client
@@ -105,6 +144,25 @@ naming(RADARR, {
     "movieFolderFormat": "{Movie CleanTitle} ({Release Year})",
 })
 
+print("== Lidarr ==")
+if LIDARR[1]:
+    lidarr_root_folder("/data/media/music")
+    qbit_client(LIDARR, "music", {"cat": "musicCategory"})
+    # Lidarr has no albumFolderFormat -- the album folder is part of the track
+    # format path. Produces  Artist/Album (Year)/01 - Track.flac  per
+    # MEDIA-STRUCTURE.md. https://wiki.servarr.com/lidarr/settings
+    naming(LIDARR, {
+        "renameTracks": True,
+        "artistFolderFormat": "{Artist Name}",
+        "standardTrackFormat":
+            "{Album Title} ({Release Year})/{track:00} - {Track Title}",
+        "multiDiscTrackFormat":
+            "{Album Title} ({Release Year})/CD{medium:00}/{track:00} - {Track Title}",
+    })
+else:
+    print("  skipped -- no appdata/lidarr/config.xml yet "
+          "(docker compose up -d lidarr, open the UI once, re-run)")
+
 print("== Prowlarr ==")
 pb, pk, pv = PROWL
 # FlareSolverr tag
@@ -151,6 +209,9 @@ add_app("Sonarr", "Sonarr", "SonarrSettings", "http://sonarr:8989", SONARR[1],
         [5000,5010,5020,5030,5040,5045,5050,5090])
 add_app("Radarr", "Radarr", "RadarrSettings", "http://radarr:7878", RADARR[1],
         [2000,2010,2020,2030,2040,2045,2050,2060,2070,2080,2090])
+if LIDARR[1]:
+    add_app("Lidarr", "Lidarr", "LidarrSettings", "http://lidarr:8686", LIDARR[1],
+            [3000,3010,3030,3040])
 
 # A few reliable public indexers to start with (add/curate the rest in the UI)
 WANT = {
@@ -189,4 +250,12 @@ Done. Verify:
   Sonarr    http://192.168.1.64:8989  -> Settings > Indexers : populated from Prowlarr
                                        -> Settings > Download Clients : qBittorrent "Test" green
   Radarr    http://192.168.1.64:7878  -> same two checks
+  Lidarr    http://192.168.1.64:8686  -> same two checks
+
+Quality profiles are NOT set by this script. Sonarr + Radarr get theirs from
+recyclarr/recyclarr.yml:
+  docker compose run --rm recyclarr sync --preview   # dry run first
+  docker compose run --rm recyclarr sync
+Lidarr's profile is still a manual step in its UI (FLAC preferred, MP3-320
+fallback, upgrade until FLAC).
 """)

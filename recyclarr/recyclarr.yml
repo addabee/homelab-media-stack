@@ -1,0 +1,117 @@
+# yaml-language-server: $schema=https://schemas.recyclarr.dev/v8/config-schema.json
+################################################################################
+# Recyclarr — syncs TRaSH-Guides quality definitions, quality profiles and
+# custom formats into Sonarr and Radarr on a schedule.
+#
+# Policy encoded here:
+#   TV      1080p only. No 4K tier, no second Sonarr instance.
+#   Movies  2160p preferred, 1080p accepted as fallback and upgraded in place
+#           when a 4K release later appears.
+#   Both    direct-play first — prefer releases that stream without a transcode
+#           on the widest range of clients.
+#
+# API keys come from the environment (.env), never from this file.
+# ALWAYS dry-run before applying:
+#     docker compose run --rm recyclarr sync --preview
+################################################################################
+
+sonarr:
+  # ---------------------------------------------------------------------------
+  # TV — stock TRaSH "WEB-1080p" template, unmodified.
+  # https://trash-guides.info/Sonarr/sonarr-setup-quality-profiles/#web-1080p
+  # ---------------------------------------------------------------------------
+  tv-1080p:
+    base_url: http://sonarr:8989
+    api_key: !env_var SONARR_API_KEY
+
+    quality_definition:
+      type: series
+
+    quality_profiles:
+      - trash_id: 72dae194fc92bf828f32cde7744e51a1  # WEB-1080p
+        reset_unmatched_scores:
+          enabled: true
+
+    custom_format_groups:
+      add:
+        - trash_id: 158188097a58d7687dee647e04af0da3  # [Optional] Golden Rule HD
+        - trash_id: 85fae4a2294965b75710ef2989c850eb  # [Streaming Services] HD/UHD boost
+          exclude:
+            - 43b3cf48cb385cd3eac608ee6bca7f09  # UHD Streaming Boost — no 4K tier for TV
+        - trash_id: 59c3af66780d08332fdc64e68297098f  # [Unwanted] Unwanted Formats
+          select:
+            - 82d40da2bc6923f41e14394075dd4b03  # No-RlsGroup
+            - e1a997ddb54e3ecbfe06341ad323c458  # Obfuscated
+            - 06d66ab109d4d2eddb2794d21526d140  # Retags
+
+radarr:
+  # ---------------------------------------------------------------------------
+  # Movies — 2160p preferred, 1080p fallback, upgraded in place.
+  #
+  # TRaSH ships no template for a mixed-resolution profile. Its guide says so
+  # directly: the single-resolution profiles "can be combined into a single
+  # Quality Profile if you want to be able to upgrade from 1080p to 4K/2160p
+  # when and if it becomes available after the 1080p release is made."
+  # So the profile below is hand-built; the custom formats still come from TRaSH.
+  # https://trash-guides.info/Radarr/radarr-setup-quality-profiles/
+  # ---------------------------------------------------------------------------
+  movies-4k-preferred:
+    base_url: http://radarr:7878
+    api_key: !env_var RADARR_API_KEY
+
+    quality_definition:
+      type: movie
+
+    quality_profiles:
+      - name: Movies (4K preferred)
+        reset_unmatched_scores:
+          enabled: true
+        upgrade:
+          allowed: true
+          until_quality: Bluray-2160p
+          until_score: 10000
+        min_format_score: 0
+        quality_sort: top
+        qualities:
+          # Highest first. A 1080p grab today is upgraded when 4K appears.
+          - name: Bluray-2160p
+            qualities: [Bluray-2160p]
+          - name: WEB 2160p
+            qualities: [WEBDL-2160p, WEBRip-2160p]
+          - name: Bluray-1080p
+            qualities: [Bluray-1080p]
+          - name: WEB 1080p
+            qualities: [WEBDL-1080p, WEBRip-1080p]
+          # Remux-2160p is deliberately OUT: 40-80 GB per film, and it defeats
+          # "direct play first" on every client that is not wired to the TV.
+          # Uncomment the tier below (and raise until_quality) if that changes.
+          # - name: Remux-2160p
+          #   qualities: [Remux-2160p]
+
+    custom_format_groups:
+      add:
+        - trash_id: ff204bbcecdd487d1cefcefdbf0c278d  # [Optional] Golden Rule UHD
+        - trash_id: a3ac6af01d78e4f21fcb75f601ac96df  # [Unwanted] Unwanted Formats
+          ######################################################################
+          # OPEN DECISION — YTS.
+          #
+          # You asked to prefer YTS for movies. TRaSH's LQ custom format
+          # (90a6f9a2..., score -10000) matches ^(YTS(.(MX|LT|AG))?)$, ^(YIFY)$
+          # and ^(RARBG)$, so while LQ is active Radarr will REJECT every YTS
+          # release. Uncommenting the exclude line below unblocks YTS — but it
+          # also unblocks YIFY and RARBG and drops LQ's other protections.
+          #
+          # Preferring YTS additionally needs a positive-scored "YTS" custom
+          # format. Recyclarr cannot create one: it only syncs formats that
+          # exist in the TRaSH guides, and there is no YTS-preferred format
+          # there. That CF has to be created directly in Radarr (wire-arr.py
+          # can POST it to /api/v3/customformat).
+          #
+          # Nothing here is enabled until you say which way to go.
+          ######################################################################
+          exclude:
+            # - 90a6f9a284dff5103f6346090e6280c8  # LQ  <- unblocks YTS/YIFY/RARBG
+          select:
+            - ae9b7c9ebde1f3bd336a8cbd1ec4c5e5  # No-RlsGroup
+            - 7357cf5161efbf8c4d5d0c30b4815ee2  # Obfuscated
+            - 5c44f52a8714fdd79bb4d98e2673be1f  # Retags

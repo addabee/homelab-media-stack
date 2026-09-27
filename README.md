@@ -8,46 +8,48 @@ Runs 24/7 on consumer hardware — Ryzen 9 3900X, RTX 4070, 7.3 TB array. Two
 services are reachable from the internet; the other seven deliberately are not.
 
 **Stack:** Docker Compose · Caddy · Jellyfin · gluetun (OpenVPN) · qBittorrent ·
-Sonarr · Radarr · Prowlarr · Bazarr · Jellyseerr · DuckDNS · Python · Bash · ufw
+Sonarr · Radarr · Prowlarr · Bazarr · Jellyseerr · DuckDNS · WireGuard · Python ·
+Bash · ufw
 
 ## Architecture
 
 ```
                           Internet
                               │
-                      :80 :443│   ← the only forwarded ports
-                              ▼
-                ┌──────────────────────────────┐
-                │  Caddy   (network_mode: host)│  Let's Encrypt, auto-renewed
-                │  TLS termination + proxy     │
-                └───────┬──────────────┬───────┘
-                        │              │
-                 jellyfin.*      requests.*
-                        │              │
-                        ▼              ▼
-                 ┌───────────┐   ┌────────────┐
-   RTX 4070 ───► │ Jellyfin  │   │ Jellyseerr │
-   NVENC/CUDA    │  :8096    │   │   :5055    │
-                 └─────┬─────┘   └──────┬─────┘
-                       │                │
-                       │                ▼
-                       │   ┌──────────────────────────┐
-                       │   │ Sonarr · Radarr          │  LAN only —
-                       │   │ Prowlarr · Bazarr        │  never proxied
-                       │   └────────────┬─────────────┘
-                       │                │
-                       │                ▼
-                       │   ┌──────────────────────────────┐
-                       │   │ gluetun — VPN killswitch     │
-                       │   │   ├── qBittorrent            │  share gluetun's
-                       │   │   └── FlareSolverr           │  network namespace
-                       │   └────────────┬─────────────────┘
-                       │                │
-                       ▼                ▼
-                ┌────────────────────────────────────────┐
-                │  /mnt/calculon   (single filesystem)   │
-                │  media/  ◄──── hardlinks ────  downloads/│
-                └────────────────────────────────────────┘
+              :80 :443 tcp    │    :51820 udp      ← the only forwarded ports
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+  ┌──────────────────────────────┐  ┌──────────────────────┐
+  │  Caddy   (network_mode: host)│  │ WireGuard (native)   │  admin only:
+  │  TLS termination + proxy     │  │ wg0  10.13.13.0/24   │  tunnel → LAN
+  └───────┬──────────────┬───────┘  └──────────┬───────────┘
+          │              │                     │
+   jellyfin.*      requests.*                  │
+          │              │                     │
+          ▼              ▼                     │
+   ┌───────────┐   ┌────────────┐              │
+   │ Jellyfin  │◄──│ Jellyseerr │              │
+   │  :8096    │   │   :5055    │              │
+   └─────┬─────┘   └──────┬─────┘              │
+   ▲     │                │                    │
+RTX 4070 │                ▼                    ▼
+NVENC    │   ┌──────────────────────────────────────────┐
+         │   │ Sonarr · Radarr · Prowlarr · Bazarr      │  LAN + tunnel only —
+         │   │ qBittorrent UI                           │  never proxied
+         │   └────────────┬─────────────────────────────┘
+         │                │
+         │                ▼
+         │   ┌──────────────────────────────┐
+         │   │ gluetun — VPN killswitch     │
+         │   │   ├── qBittorrent            │  share gluetun's
+         │   │   └── FlareSolverr           │  network namespace
+         │   └────────────┬─────────────────┘
+         │                │
+         ▼                ▼
+  ┌──────────────────────────────────────────┐
+  │  /mnt/calculon   (single filesystem)     │
+  │  media/  ◄──── hardlinks ────  downloads/│
+  └──────────────────────────────────────────┘
 ```
 
 ## Design decisions
@@ -67,8 +69,10 @@ across filesystems silently turns every import into a full copy.
 **The public attack surface is two services, not nine.** Jellyfin and Jellyseerr
 are proxied; the \*arr apps and qBittorrent stay LAN-only. They ship with weak or
 absent authentication and have a rough CVE history, and a request portal already
-covers what a remote user actually needs. Remote admin goes over Tailscale
-instead of through the proxy.
+covers what a remote user actually needs. Remote admin goes over a WireGuard
+tunnel instead of through the proxy — it authenticates by key before it will
+even answer a packet, and it runs natively so it still works when Docker is
+down (see [Remote admin](#remote-admin-wireguard)).
 
 **Forwarded ports sync themselves.** PIA rotates the forwarded port on every
 reconnect, which would otherwise silently kill torrent connectivity. A mod
@@ -84,6 +88,7 @@ and a tmpfs transcode scratch to keep churn off the array.
 | Piece | Where | Notes |
 |---|---|---|
 | Jellyfin | **native** (systemd), port `8096` | 10.11.11, not in this stack |
+| WireGuard | **native** (`wg-quick@wg0`), UDP `51820` | admin tunnel to the LAN; not in this stack |
 | gluetun | container | PIA OpenVPN + port forwarding, VPN gateway; control server on `:8000` is API-key protected |
 | qBittorrent | container, via gluetun | Web UI `:8080`; listen port auto-synced to PIA's forwarded port by the GSP mod (runs inside this container) |
 | Prowlarr | container | `:9696` — indexer manager |
@@ -365,10 +370,85 @@ How it hangs together:
   turn off any guest/auto-login. Dashboard → Users.
 - Watch for failed logins: Dashboard → Notifications, or the Playback Reporting
   plugin already installed.
-- To reach the *arr apps from outside, add Tailscale (`sudo tailscale up`)
-  rather than proxying them — it needs no port forwards and no public exposure.
+- To reach the *arr apps from outside, use the [WireGuard tunnel](#remote-admin-wireguard)
+  rather than proxying them.
 - `docker compose pull && docker compose up -d` picks up Caddy/Jellyfin security
   fixes; worth doing monthly now that something is internet-facing.
+
+## Remote admin (WireGuard)
+
+Everything Caddy does *not* publish — Sonarr, Radarr, Prowlarr, Bazarr, the
+qBittorrent UI, SSH to the host — is reached from outside over a WireGuard
+tunnel. A connected device gets an address on `10.13.13.0/24` and sees
+`192.168.1.0/24` as if it were on the home Wi‑Fi.
+
+Why WireGuard, and why native:
+
+- **Nothing to attack.** The server answers only packets that carry a valid
+  handshake for a known key; everything else is dropped silently. A port scan
+  sees a closed port. That is a much smaller surface than any web login.
+- **Runs on the host, not in a container.** This is the tunnel you use to fix
+  Docker when Docker is broken. The kernel module ships with Ubuntu; the
+  install adds only `wireguard-tools`, one config file and a systemd unit.
+- **Split tunnel by default.** Only LAN traffic rides the VPN; the phone's
+  normal connection carries everything else, so there's no battery or
+  bandwidth cost to leaving it on. `--full` peers route *everything* through
+  home for hostile Wi‑Fi.
+- **No Tailscale.** It would be easier, but it puts a third party's control
+  plane in the auth path. Plain WireGuard is two files and no account.
+
+### Setup (once)
+
+```
+sudo bash /mnt/calculon/media-stack/wireguard-install.sh
+```
+
+Installs the tools, generates the server key into `/etc/wireguard/wg0.conf`,
+persists `ip_forward`, opens ufw (`51820/udp` in; `wg0` trusted in and
+forwarded like the LAN), and enables `wg-quick@wg0`. Safe to re-run.
+
+Then forward **UDP 51820** on the gateway, same two-stage NAT/Gaming dance as
+[step 3 above](#setup): custom service `WireGuard`, global port `51820`–`51820`,
+base host port `51820`, protocol **UDP**, assigned to this host (`192.168.1.64`).
+
+### Adding a device
+
+```
+sudo ./wg-peer.sh add phone            # split tunnel: LAN only
+sudo ./wg-peer.sh add laptop --full    # everything via home
+```
+
+Prints a QR code (WireGuard app → **+** → *Scan from QR code*) and the same
+config as a file for desktop clients. `show <name>` re-prints it, `list` shows
+who exists, `status` shows who is connected and when they last handshook,
+`remove <name>` revokes a device — its key is destroyed and the change is live
+immediately, no restart.
+
+Client private keys live in `/etc/wireguard/peers/` (root-only, `0600`). One
+peer per device: a key can't be connected from two places at once, and
+revoking one device shouldn't take out the others.
+
+Once connected, the admin apps are at their LAN addresses:
+`http://192.168.1.64:8989` (Sonarr), `:7878` (Radarr), `:9696` (Prowlarr),
+`:6767` (Bazarr), `:8080` (qBittorrent), and `ssh 192.168.1.64`.
+
+### How it hangs together
+
+- `wg0.conf` `[Interface]` has the server key and a `PostUp` that
+  MASQUERADEs `10.13.13.0/24` out of `enp5s0`, because LAN devices (and the
+  gateway) have no route back to the tunnel subnet. Docker containers behind
+  published ports don't need it — the host routes replies straight back.
+- Each `[Peer]` block is tagged `# peer: <name>` so `wg-peer.sh` can find it;
+  changes are applied with `wg syncconf` so other peers stay up.
+- ufw: `51820/udp` open to the world (safe, see above); `allow in on wg0` so
+  tunnel clients reach native services on the host; `route allow in on wg0`
+  so they're forwarded to containers, the LAN and (for `--full`) the internet.
+- Endpoint is `${DUCKDNS_SUBDOMAIN}.duckdns.org:51820` — the same dynamic DNS
+  record Caddy uses, read from `.env` at peer-creation time.
+
+Check it: `bash check-remote-access.sh` (step 9), or `sudo ./wg-peer.sh status`
+after connecting a phone from cell data — a handshake in the last couple of
+minutes means the port forward and everything behind it works.
 
 ## Transcoding
 

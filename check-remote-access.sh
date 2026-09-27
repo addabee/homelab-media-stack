@@ -79,3 +79,18 @@ for p in 8989 7878 9696 6767 8080 8096; do
   [ "$code" = "000" ] && ok "port $p closed from outside" \
     || bad "port $p ANSWERED ($code) -- remove that forward on the router"
 done
+
+echo "9. WireGuard (optional -- skip if wireguard-install.sh was never run)"
+if systemctl is-enabled wg-quick@wg0 >/dev/null 2>&1; then
+  systemctl is-active wg-quick@wg0 >/dev/null && ok "wg-quick@wg0 running" || bad "wg-quick@wg0 not running -- journalctl -u wg-quick@wg0"
+  if sudo -n ufw status >/dev/null 2>&1; then
+    sudo -n ufw status | grep -qE '^51820/udp\s+ALLOW' && ok "ufw allows 51820/udp" || bad "ufw is NOT allowing 51820/udp -- re-run wireguard-install.sh"
+    sudo -n ./wg-peer.sh status 2>/dev/null | sed 's/^/       /'
+  else
+    warn "need sudo for ufw / peer status:  sudo ./wg-peer.sh status"
+  fi
+  echo "       UDP can't be probed from here: connect a peer from cell data and"
+  echo "       check 'sudo ./wg-peer.sh status' shows a recent handshake."
+else
+  warn "not installed (sudo bash wireguard-install.sh)"
+fi

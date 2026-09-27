@@ -48,6 +48,10 @@ services:
     image: lscr.io/linuxserver/qbittorrent:latest
     container_name: qbittorrent
     restart: unless-stopped
+    # Cap page cache: seeding 1.2 TB otherwise grows this cgroup to ~23 GB and
+    # evicts Jellyfin (and everything idle) to swap. Only ~0.13 GB is real
+    # process memory, so the kernel reclaims cache well before any OOM.
+    mem_limit: 8g
     network_mode: "service:gluetun"     # <-- all traffic via the VPN
     depends_on:
       gluetun:

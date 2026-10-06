@@ -139,7 +139,10 @@ if data:
         except Exception:
             pass
     ds = data.get("diskSpace") or {}
-    alloc, used = ds.get("available", 0), ds.get("used", 0)
+    # "available" is the FREE space left, not the allocation. Trash counts as
+    # occupied: the node stops accepting uploads once used + trash hits the cap.
+    used = ds.get("used", 0) + ds.get("trash", 0)
+    alloc = ds.get("allocated") or (used + ds.get("available", 0))
     if alloc and (used / alloc) * 100 > float(CFG["DISK_USED_PCT"]):
         flag("alloc_full", f"Allocation {used/alloc*100:.0f}% full "
                            f"({used/1e12:.2f} of {alloc/1e12:.2f} TB).")

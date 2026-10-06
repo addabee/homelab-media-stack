@@ -467,9 +467,12 @@ deletion, and mounts `/var/cache/jellyfin/transcodes` as an 8 GB tmpfs.
 
 ### Sharing the GPU with other workloads
 
-A GPU cannot be meaningfully shared between Jellyfin's NVENC sessions and
-another tenant's CUDA workload — whoever arrives second fails. Two pieces exist
-for hosts that need to give the card up sometimes:
+Jellyfin's NVENC sessions can run alongside another CUDA workload: encode and
+decode use dedicated NVENC/NVDEC engines, so the two coexist as long as there is
+VRAM to spare. What they do contend for is the CUDA cores, which Jellyfin's
+tone-mapping and scaling filters also run on, and memory — a tenant that claims
+most of the VRAM, or the whole card, will make transcodes fail to start. Two
+pieces exist for hosts that need to give the card up entirely sometimes:
 
 | File | Purpose |
 |---|---|

@@ -372,8 +372,9 @@ How it hangs together:
   plugin already installed.
 - To reach the *arr apps from outside, use the [WireGuard tunnel](#remote-admin-wireguard)
   rather than proxying them.
-- `docker compose pull && docker compose up -d` picks up Caddy/Jellyfin security
-  fixes; worth doing monthly now that something is internet-facing.
+- Container images update themselves weekly (see
+  [Automatic updates](#automatic-updates)), which picks up Caddy security fixes.
+  Jellyfin is native, so it updates with `apt`.
 
 ## Remote admin (WireGuard)
 
@@ -532,8 +533,24 @@ control, so it must be unguessable) and adds a 15-minute cron entry. Thresholds
 and the alert channel live in `~/.config/storj-monitor.conf` — set `NOTIFY_CMD`
 there to route alerts to a Discord/Slack webhook or anything else instead.
 
+## Automatic updates
+
+`update-stack.sh` pulls newer images and recreates only the containers whose
+image changed. A cron entry runs it **Sundays at 04:30**, logging to
+`~/.local/state/update-stack.log`. Install the entry with
+`./update-stack.sh --install`; preview a run with `./update-stack.sh --dry-run`.
+
+- Each updated container restarts for a few seconds. Jellyfin runs natively, so
+  playback on the LAN is unaffected; remote streams drop briefly if Caddy updates.
+- If gluetun is replaced, qBittorrent and FlareSolverr would be left attached to
+  the old container's network namespace, with no network at all. The script
+  checks for that and recreates them onto the new one.
+- Superseded images are pruned after each run.
+- Only services in `docker-compose.yml` are touched. Storj's `storagenode`
+  container updates its own binary internally.
+
 ## Notes / TODO
 
 - `.env` contains a live credential. It is `chmod 600`. Don't copy it into a
   git repo or a shared location.
-- Update everything: `cd /mnt/calculon/media-stack && docker compose pull && docker compose up -d`.
+- Update everything now, without waiting for Sunday: `./update-stack.sh`.
